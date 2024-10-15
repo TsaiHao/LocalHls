@@ -428,6 +428,7 @@ dependencies = [
  "m3u8-rs",
  "reqwest",
  "tokio",
+ "url",
 ]
 
 [[package]]
