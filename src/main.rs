@@ -5,6 +5,7 @@ use reqwest::header::HeaderMap;
 use tokio;
 use m3u8_rs;
 use m3u8_rs::Playlist;
+use futures::stream::{StreamExt, FuturesOrdered};
 
 async fn download_file(url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     println!("[debug] Downloading file: {}", url);
@@ -66,11 +67,10 @@ fn save_file(content: &Vec<u8>, output_file: &std::path::Path) -> Result<(), Box
     Ok(())
 }
 
-fn get_relative_path(base: &Url, target: &Url) -> Result<String, Box<dyn std::error::Error>> {
+fn get_relative_path(base: &Url, target: &Url) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     if base.host() != target.host() {
         return Err("Hosts are different".into());
     }
-    let mut diff = "".to_string();
     let base_path_segments = base.path_segments().unwrap().collect::<Vec<&str>>();
     let target_path_segments = target.path_segments().unwrap().collect::<Vec<&str>>();
     let mut i = 0;
@@ -80,10 +80,12 @@ fn get_relative_path(base: &Url, target: &Url) -> Result<String, Box<dyn std::er
         }
         i += 1;
     }
-    for seg in i..base_path_segments.len() {
-        diff.push_str(target_path_segments[seg]);
+
+    let mut rel_path = std::path::PathBuf::new();
+    for seg in i..target_path_segments.len() {
+        rel_path.push(target_path_segments[seg]);
     }
-    Ok(diff)
+    Ok(rel_path)
 }
 
 fn get_base_url(url: &Url) -> Url {
@@ -95,7 +97,7 @@ async fn handle_media_manifest(m3u8_url: &Url, base_url: &Url, output_dir: &std:
     println!("-------------------------");
     println!("Processing media playlist: {}", m3u8_url);
 
-    let path = get_relative_path(base_url, m3u8_url)?;
+    let mut path = get_relative_path(base_url, m3u8_url)?;
     let media_file_path = output_dir.join(&path);
 
     let content = download_file(&m3u8_url, None).await?;
@@ -108,19 +110,32 @@ async fn handle_media_manifest(m3u8_url: &Url, base_url: &Url, output_dir: &std:
         Err(_) => return Err("Not a media playlist".into())
     };
 
-    let output_dir = output_dir.join(path.rsplitn(2, "/").last().unwrap());
+    let mut output_dir = output_dir.to_path_buf();
+    if path.pop() {
+        output_dir = output_dir.join(&path);
+    }
     let segment_count = manifest.segments.len();
 
+    let mut segment_tasks = FuturesOrdered::new();
+    let base_url = get_base_url(m3u8_url);
+
     for (i, segment) in manifest.segments.iter().enumerate() {
-        println!("[{}/{}]Processing segment: {}", i, segment_count, segment.uri);
-
         let segment_uri = base_url.join(&segment.uri)?;
-        let segment_content = download_file(&segment_uri, None).await?;
         let segment_file_path = output_dir.join(&segment.uri);
+        let short_uri = segment.uri.clone();
 
-        save_file(&segment_content, &segment_file_path)?;
+        segment_tasks.push_back(async move {
+            println!("[{}/{}]Start processing segment: {}", i + 1, segment_count, short_uri);
+            let segment_content = download_file(&segment_uri, None).await?;
+            save_file(&segment_content, &segment_file_path)?;
+            println!("Segment saved to: {}", segment_file_path.display());
 
-        println!("Segment saved to: {}", segment_file_path.display());
+            Ok::<(), Box<dyn std::error::Error>>(())
+        });
+    }
+
+    while let Some(result) = segment_tasks.next().await {
+        result?;
     }
     println!("--------------------------");
     Ok(())
@@ -143,7 +158,7 @@ async fn handle_master_manifest(m3u8_url: &Url, output_dir: &std::path::Path) ->
 
     let variant_count = master_list.variants.len();
     for (i, variant) in master_list.variants.iter().enumerate() {
-        println!("[{}/{}] Processing variant: {}", i, variant_count, variant.uri);
+        println!("[{}/{}] Processing variant: {}", i + 1, variant_count, variant.uri);
         let variant_url = base_url.join(&variant.uri)?;
         handle_media_manifest(&variant_url, &base_url, &output_dir).await?;
         println!("");
@@ -193,8 +208,11 @@ mod tests {
         let test_url = test_url.unwrap();
         let base_url = get_base_url(&test_url);
         assert_eq!(base_url.as_str(), "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/");
-        let relative_path = get_relative_path(&base_url, &test_url);
-        assert!(relative_path.is_ok());
-        assert_eq!(relative_path.unwrap(), "bipbop_4x3_variant.m3u8");
+        let relative_path = get_relative_path(&base_url, &test_url).unwrap();
+        assert_eq!(relative_path.to_str().unwrap(), "bipbop_4x3_variant.m3u8");
+
+        let media_url = Url::parse("https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/gear1/prog_index.m3u8").unwrap();
+        let relative_path = get_relative_path(&base_url, &media_url).unwrap();
+        assert_eq!(relative_path.to_str().unwrap(), "gear1/prog_index.m3u8");
     }
 }
