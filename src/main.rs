@@ -37,17 +37,16 @@ async fn download_file(url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>,
     }
 }
 
-fn get_filename_from_url(url: &Url) -> String {
-    let url_parts: Vec<&str> = url.path_segments().unwrap().collect();
-    let mut name = url_parts[url_parts.len() - 1].to_owned();
-    if name.contains("?") {
-        let name_parts: Vec<&str> = name.split("?").collect();
-        name = name_parts[0].to_owned();
+fn get_filename_from_url(url: &Url) -> Option<String> {
+    if url.path().ends_with('/') {
+        return None;
     }
-    if name.starts_with('.') {
-        name = format!("{}{}", url_parts[url_parts.len() - 2], name);
+    let segments = url.path_segments()?.collect::<Vec<&str>>();
+    let mut name = segments[segments.len() - 1].to_string();
+    if name.starts_with('.') && name.len() > 1 {
+        name = format!("{}{}", segments[segments.len() - 2], name);
     }
-    name
+    Some(name)
 }
 
 fn create_dir_if_not_exists(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,6 +67,7 @@ fn save_file(content: &Vec<u8>, output_file: &std::path::Path) -> Result<(), Box
 }
 
 fn get_relative_path(base: &Url, target: &Url) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    // todo: url.make_relative?
     if base.host() != target.host() {
         return Err("Hosts are different".into());
     }
@@ -142,7 +142,8 @@ async fn handle_media_manifest(m3u8_url: &Url, base_url: &Url, output_dir: &std:
 }
 
 async fn handle_master_manifest(m3u8_url: &Url, output_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    let master_file_name = get_filename_from_url(m3u8_url);
+    let master_file_name = get_filename_from_url(m3u8_url).ok_or("Failed to get filename from URL")?;
+    
     let master_file_path = output_dir.join(master_file_name);
 
     let content = download_file(m3u8_url, None).await?;
@@ -214,5 +215,21 @@ mod tests {
         let media_url = Url::parse("https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/gear1/prog_index.m3u8").unwrap();
         let relative_path = get_relative_path(&base_url, &media_url).unwrap();
         assert_eq!(relative_path.to_str().unwrap(), "gear1/prog_index.m3u8");
+    }
+
+    #[tokio::test]
+    async fn test_get_filename_from_url() {
+        let test_url = Url::parse("https://github.com/foo/bar/baz.txt?query=1&query=2").unwrap();
+
+        let file_name = get_filename_from_url(&test_url).unwrap();
+        assert_eq!(file_name, "baz.txt");
+
+        let test_url = Url::parse("https://github.com/foo/bar/baz.txt").unwrap();
+        let file_name = get_filename_from_url(&test_url).unwrap();
+        assert_eq!(file_name, "baz.txt");
+
+        let test_url = Url::parse("https://github.com/foo/bar/baz/").unwrap();
+        let file_name = get_filename_from_url(&test_url);
+        assert!(file_name.is_none());
     }
 }
