@@ -6,6 +6,27 @@ use tokio;
 use m3u8_rs;
 use m3u8_rs::Playlist;
 use futures::stream::{StreamExt, FuturesOrdered};
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about=None)]
+struct Args {
+    /// The URL of the m3u8 playlist
+    #[arg(short, long)]
+    url: String,
+
+    /// The output directory
+    #[arg(short, long)]
+    output: String,
+
+    /// Additional headers to send with the request
+    #[arg(long)]
+    headers: Option<Vec<String>>,
+
+    /// Server port to use
+    #[arg(short, long)]
+    port: Option<u16>,
+}
 
 async fn download_file(url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     println!("[debug] Downloading file: {}", url);
@@ -170,8 +191,21 @@ async fn handle_master_manifest(m3u8_url: &Url, output_dir: &std::path::Path) ->
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let m3u8_url = "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8";
-    let output_dir = std::env::current_dir().unwrap().join("output");
+    let args: Args = Args::parse();
+
+    let m3u8_url = args.url.as_str();
+    let output_dir = args.output.as_str();
+    let output_dir = std::path::Path::new(output_dir);
+
+    println!("-------------------------");
+    println!("Received Parameters:");
+    println!("URL: {}", m3u8_url);
+    println!("Output Directory: {}", output_dir.display());
+    if let Some(headers) = &args.headers {
+        println!("Headers: {:?}", headers);
+    }
+    println!("-------------------------");
+
     create_dir_if_not_exists(&output_dir)?;
 
     let m3u8_url = Url::parse(m3u8_url)?;
