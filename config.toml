@@ -1,0 +1,12 @@
+url = "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8"
+
+headers = [""]
+
+output = "output"
+
+[proxy]
+url = "http://192.168.1.16"
+port = 7890
+
+[server]
+port = 8080

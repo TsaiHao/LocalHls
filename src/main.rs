@@ -6,26 +6,34 @@ use tokio;
 use m3u8_rs;
 use m3u8_rs::Playlist;
 use futures::stream::{StreamExt, FuturesOrdered};
-use clap::Parser;
+use warp;
+use warp::Filter;
+use toml;
+use serde::Deserialize;
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about=None)]
+#[derive(Deserialize)]
 struct Args {
     /// The URL of the m3u8 playlist
-    #[arg(short, long)]
     url: String,
 
     /// The output directory
-    #[arg(short, long)]
     output: String,
 
     /// Additional headers to send with the request
-    #[arg(long)]
     headers: Option<Vec<String>>,
 
     /// Server port to use
-    #[arg(short, long)]
     port: Option<u16>,
+}
+
+struct StreamConfig {
+    client: &mut reqwest::Client,
+
+    url: Url,
+
+    output_dir: std::path::Path,
+
+    args: Args,
 }
 
 async fn download_file(url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -189,13 +197,44 @@ async fn handle_master_manifest(m3u8_url: &Url, output_dir: &std::path::Path) ->
     Ok(())
 }
 
+async fn serve_files(port: u16, root_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root_dir = root_dir.to_path_buf();
+    let html_code = format!("Root directory: {}", root_dir.display());
+    let end = warp::path::end().map(move || {
+        warp::reply::html(html_code.clone())
+    });
+
+    static mut ROOT_DIR: Option<std::path::PathBuf> = None;
+    unsafe {
+        ROOT_DIR = Some(root_dir.clone());
+    }
+
+    let file_server = warp::fs::dir(root_dir);
+    let routes = end.or(file_server);
+    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Args = Args::parse();
+    let config_file = std::env::args().nth(1).expect("No config file provided");
+    let config_file = std::path::Path::new(&config_file);
+    let config_text = std::fs::read_to_string(config_file)?;
+    let args: Args = toml::from_str(&config_text)?;
 
-    let m3u8_url = args.url.as_str();
+    let m3u8_url = Url::parse(args.url.as_str())?;
+
     let output_dir = args.output.as_str();
     let output_dir = std::path::Path::new(output_dir);
+
+    let mut client = reqwest::Client::new();
+
+    let stream_config = StreamConfig {
+        client: &mut client,
+        args,
+        url: Url::parse(m3u8_url)?,
+        output_dir,
+    };
 
     println!("-------------------------");
     println!("Received Parameters:");
@@ -207,8 +246,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("-------------------------");
 
     create_dir_if_not_exists(&output_dir)?;
-
-    let m3u8_url = Url::parse(m3u8_url)?;
 
     // Todo: remove redundant downloading of manifest
     let manifest = download_file(&m3u8_url, None).await?;
@@ -228,6 +265,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err("Failed to parse m3u8 playlist")?
         }
     }
+
+    serve_files(args.port.unwrap_or(3030), &output_dir).await?;
 
     Ok(())
 }
@@ -265,5 +304,20 @@ mod tests {
         let test_url = Url::parse("https://github.com/foo/bar/baz/").unwrap();
         let file_name = get_filename_from_url(&test_url);
         assert!(file_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_arg_parse() {
+        let toml_text = r#"
+url = "https://example.com"
+output = "output"
+headers = ["header1: value1", "header2: value2"]
+port = 3030
+        "#;
+        let args: Args = toml::from_str(toml_text).unwrap();
+        assert_eq!(args.url, "https://example.com");
+        assert_eq!(args.output, "output");
+        assert_eq!(args.headers.unwrap().len(), 2);
+        assert_eq!(args.port.unwrap(), 3030);
     }
 }
