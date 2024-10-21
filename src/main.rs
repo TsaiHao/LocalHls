@@ -5,6 +5,7 @@ use reqwest::header::HeaderMap;
 use tokio;
 use m3u8_rs;
 use m3u8_rs::Playlist;
+use m3u8_rs::MasterPlaylist;
 use futures::stream::{StreamExt, FuturesOrdered};
 use warp;
 use warp::Filter;
@@ -27,16 +28,16 @@ struct Args {
 }
 
 struct StreamConfig {
-    client: &mut reqwest::Client,
+    client: reqwest::Client,
 
     url: Url,
 
-    output_dir: std::path::Path,
+    output_dir: std::path::PathBuf,
 
     args: Args,
 }
 
-async fn download_file(url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+async fn download_file(client: &reqwest::Client, url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     println!("[debug] Downloading file: {}", url);
     if let Some(hdrs) = &headers {
         for (name, value) in hdrs.iter() {
@@ -47,7 +48,6 @@ async fn download_file(url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>,
             }
         }
     }
-    let client = reqwest::Client::new();
     let request = client.get(url.as_str());
     
     let request = if let Some(hdrs) = headers {
@@ -122,14 +122,14 @@ fn get_base_url(url: &Url) -> Url {
     base_url.join("./").unwrap()
 }
 
-async fn handle_media_manifest(m3u8_url: &Url, base_url: &Url, output_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_media_manifest(manifest_url: &Url, base_url: &Url, config: &StreamConfig) -> Result<(), Box<dyn std::error::Error>> {
     println!("-------------------------");
-    println!("Processing media playlist: {}", m3u8_url);
+    println!("Processing media playlist: {}", config.url);
 
-    let mut path = get_relative_path(base_url, m3u8_url)?;
-    let media_file_path = output_dir.join(&path);
+    let mut path = get_relative_path(base_url, manifest_url)?;
+    let media_file_path = config.output_dir.join(&path);
 
-    let content = download_file(&m3u8_url, None).await?;
+    let content = download_file(&config.client, manifest_url, None).await?;
     save_file(&content, &media_file_path)?;
     println!("Media playlist saved to: {}", media_file_path.display());
 
@@ -139,14 +139,14 @@ async fn handle_media_manifest(m3u8_url: &Url, base_url: &Url, output_dir: &std:
         Err(_) => return Err("Not a media playlist".into())
     };
 
-    let mut output_dir = output_dir.to_path_buf();
+    let mut output_dir = config.output_dir.clone();
     if path.pop() {
         output_dir = output_dir.join(&path);
     }
     let segment_count = manifest.segments.len();
 
     let mut segment_tasks = FuturesOrdered::new();
-    let base_url = get_base_url(m3u8_url);
+    let base_url = get_base_url(&config.url);
 
     for (i, segment) in manifest.segments.iter().enumerate() {
         let segment_uri = base_url.join(&segment.uri)?;
@@ -155,7 +155,7 @@ async fn handle_media_manifest(m3u8_url: &Url, base_url: &Url, output_dir: &std:
 
         segment_tasks.push_back(async move {
             println!("[{}/{}]Start processing segment: {}", i + 1, segment_count, short_uri);
-            let segment_content = download_file(&segment_uri, None).await?;
+            let segment_content = download_file(&config.client, &segment_uri, None).await?;
             save_file(&segment_content, &segment_file_path)?;
             println!("Segment saved to: {}", segment_file_path.display());
 
@@ -170,34 +170,23 @@ async fn handle_media_manifest(m3u8_url: &Url, base_url: &Url, output_dir: &std:
     Ok(())
 }
 
-async fn handle_master_manifest(m3u8_url: &Url, output_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    let master_file_name = get_filename_from_url(m3u8_url).ok_or("Failed to get filename from URL")?;
-    
-    let master_file_path = output_dir.join(master_file_name);
+async fn handle_master_manifest(playlist: MasterPlaylist, config: &StreamConfig) -> Result<(), Box<dyn std::error::Error>> {
 
-    let content = download_file(m3u8_url, None).await?;
-    save_file(&content, &master_file_path)?;
-    println!("Master playlist saved to: {}", master_file_path.display());
+    let base_url = get_base_url(&config.url);
 
-    let master_list = match m3u8_rs::parse_playlist(&content) {
-        Ok((_, Playlist::MasterPlaylist(pl))) => pl,
-        Ok((_, Playlist::MediaPlaylist(_))) => return Err("Trying to process media playlist as master list".into()),
-        Err(_) => return Err("Not a master playlist".into())
-    };
-    let base_url = get_base_url(m3u8_url);
-
-    let variant_count = master_list.variants.len();
-    for (i, variant) in master_list.variants.iter().enumerate() {
+    let variant_count = playlist.variants.len();
+    println!("Processing {} variants", variant_count);
+    for (i, variant) in playlist.variants.iter().enumerate() {
         println!("[{}/{}] Processing variant: {}", i + 1, variant_count, variant.uri);
         let variant_url = base_url.join(&variant.uri)?;
-        handle_media_manifest(&variant_url, &base_url, &output_dir).await?;
+        handle_media_manifest(&variant_url, &base_url, &config).await?;
         println!("");
     }
 
     Ok(())
 }
 
-async fn serve_files(port: u16, root_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve_files(port: u16, root_dir: &std::path::PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let root_dir = root_dir.to_path_buf();
     let html_code = format!("Root directory: {}", root_dir.display());
     let end = warp::path::end().map(move || {
@@ -211,6 +200,11 @@ async fn serve_files(port: u16, root_dir: &std::path::Path) -> Result<(), Box<dy
 
     let file_server = warp::fs::dir(root_dir);
     let routes = end.or(file_server);
+
+    println!("=============================");
+    println!("Starting server on port: {}", port);
+    println!("Press Ctrl+C to stop the server");
+
     warp::serve(routes).run(([127, 0, 0, 1], port)).await;
     Ok(())
 }
@@ -222,43 +216,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_text = std::fs::read_to_string(config_file)?;
     let args: Args = toml::from_str(&config_text)?;
 
-    let m3u8_url = Url::parse(args.url.as_str())?;
-
-    let output_dir = args.output.as_str();
-    let output_dir = std::path::Path::new(output_dir);
-
-    let mut client = reqwest::Client::new();
+    let client = reqwest::Client::new();
+    let server_port = args.port.unwrap_or(3030);
 
     let stream_config = StreamConfig {
-        client: &mut client,
+        client,
+        output_dir: std::path::PathBuf::from(args.output.as_str()),
+        url: Url::parse(args.url.as_str())?,
         args,
-        url: Url::parse(m3u8_url)?,
-        output_dir,
     };
 
     println!("-------------------------");
     println!("Received Parameters:");
-    println!("URL: {}", m3u8_url);
-    println!("Output Directory: {}", output_dir.display());
-    if let Some(headers) = &args.headers {
+    println!("URL: {}", stream_config.url);
+    println!("Output Directory: {}", stream_config.output_dir.display());
+    if let Some(headers) = &stream_config.args.headers {
         println!("Headers: {:?}", headers);
     }
     println!("-------------------------");
 
-    create_dir_if_not_exists(&output_dir)?;
+    create_dir_if_not_exists(&stream_config.output_dir)?;
 
     // Todo: remove redundant downloading of manifest
-    let manifest = download_file(&m3u8_url, None).await?;
+    let manifest = download_file(&stream_config.client, &stream_config.url, None).await?;
     
     match m3u8_rs::parse_playlist(&manifest) {
-        Result::Ok((_, Playlist::MasterPlaylist(_))) => {
+        Result::Ok((_, Playlist::MasterPlaylist(playlist))) => {
             println!("Master playlist found");
-            handle_master_manifest(&m3u8_url, &output_dir).await?;
+            let master_file_name = get_filename_from_url(&stream_config.url)
+                .ok_or("Failed to get filename from URL")?;
+            let master_file_path = stream_config.output_dir.join(master_file_name);
+
+            save_file(&manifest, &master_file_path)?;
+            println!("Master playlist saved to: {}", master_file_path.display());
+
+            handle_master_manifest(playlist, &stream_config).await?;
         },
         Result::Ok((_, Playlist::MediaPlaylist(_))) => {
             println!("Media playlist found");
-            let base_url = get_base_url(&m3u8_url);
-            handle_media_manifest(&m3u8_url, &base_url, &output_dir).await?;
+            let base_url = get_base_url(&stream_config.url);
+            handle_media_manifest(&stream_config.url, &base_url, &stream_config).await?;
         },
         Result::Err(e) => {
             println!("Error: {:?}", e);
@@ -266,7 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    serve_files(args.port.unwrap_or(3030), &output_dir).await?;
+    serve_files(server_port, &stream_config.output_dir).await?;
 
     Ok(())
 }
