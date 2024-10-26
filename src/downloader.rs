@@ -2,7 +2,7 @@ use reqwest::header::HeaderMap;
 use url::Url;
 
 // todo: reuse the client
-pub async fn download_file(_client: &reqwest::Client, url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub async fn download_file(client: &reqwest::Client, url: &Url, headers: Option<HeaderMap>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     println!("[debug] Downloading file: {}", url);
     if let Some(hdrs) = &headers {
         for (name, value) in hdrs.iter() {
@@ -14,7 +14,6 @@ pub async fn download_file(_client: &reqwest::Client, url: &Url, headers: Option
         }
     }
 
-    let client = reqwest::Client::new();
     let request = client.get(url.as_str());
 
     let request = if let Some(hdrs) = headers {

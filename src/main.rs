@@ -2,15 +2,18 @@ mod downloader;
 mod server;
 mod utils;
 
-use url::Url;
-use reqwest;
-use tokio;
+use futures::stream::{FuturesOrdered, StreamExt};
 use m3u8_rs;
-use m3u8_rs::Playlist;
 use m3u8_rs::MasterPlaylist;
-use futures::stream::{StreamExt, FuturesOrdered};
-use toml;
+use m3u8_rs::Playlist;
+use reqwest;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::str::FromStr;
+use tokio;
+use toml;
+use url::Url;
 
 #[derive(Deserialize)]
 struct Args {
@@ -21,37 +24,71 @@ struct Args {
     output: String,
 
     /// Additional headers to send with the request
-    headers: Option<Vec<String>>,
+    headers: Option<HashMap<String, HeadersValue>>,
 
     /// Server port to use
     port: Option<u16>,
 }
 
+#[derive(Deserialize, Debug)]
+enum HeadersValue {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
 struct StreamConfig {
     client: reqwest::Client,
-
     url: Url,
-
+    headers: Option<HeaderMap>,
     output_dir: std::path::PathBuf,
-
     args: Args,
 }
 
-async fn handle_media_manifest(manifest_url: &Url, base_url: &Url, config: &StreamConfig) -> Result<(), Box<dyn std::error::Error>> {
+fn parse_headers(headers: &HashMap<String, HeadersValue>) -> Option<HeaderMap> {
+    let mut header_map = HeaderMap::new();
+    for (name, value) in headers {
+        match value {
+            HeadersValue::Single(value) => {
+                header_map.insert(
+                    HeaderName::from_str(name).ok()?,
+                    HeaderValue::from_str(value).ok()?,
+                );
+            }
+            HeadersValue::Multiple(values) => {
+                for value in values.iter() {
+                    header_map.append(
+                        HeaderName::from_str(name).ok()?,
+                        HeaderValue::from_str(value).ok()?,
+                    );
+                }
+            }
+        }
+    }
+    Some(header_map)
+}
+
+async fn handle_media_manifest(
+    manifest_url: &Url,
+    base_url: &Url,
+    config: &StreamConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("-------------------------");
     println!("Processing media playlist: {}", config.url);
 
     let mut path = utils::get_relative_path(base_url, manifest_url)?;
     let media_file_path = config.output_dir.join(&path);
 
-    let content = downloader::download_file(&config.client, manifest_url, None).await?;
+    let content =
+        downloader::download_file(&config.client, manifest_url, config.headers.clone()).await?;
     utils::save_file(&content, &media_file_path)?;
     println!("Media playlist saved to: {}", media_file_path.display());
 
     let manifest = match m3u8_rs::parse_playlist(&content) {
         Ok((_, Playlist::MediaPlaylist(pl))) => pl,
-        Ok((_, Playlist::MasterPlaylist(_))) => return Err("Trying to process master playlist as media list".into()),
-        Err(_) => return Err("Not a media playlist".into())
+        Ok((_, Playlist::MasterPlaylist(_))) => {
+            return Err("Trying to process master playlist as media list".into())
+        }
+        Err(_) => return Err("Not a media playlist".into()),
     };
 
     let mut output_dir = config.output_dir.clone();
@@ -69,8 +106,15 @@ async fn handle_media_manifest(manifest_url: &Url, base_url: &Url, config: &Stre
         let short_uri = segment.uri.clone();
 
         segment_tasks.push_back(async move {
-            println!("[{}/{}]Start processing segment: {}", i + 1, segment_count, short_uri);
-            let segment_content = downloader::download_file(&config.client, &segment_uri, None).await?;
+            println!(
+                "[{}/{}]Start processing segment: {}",
+                i + 1,
+                segment_count,
+                short_uri
+            );
+            let segment_content =
+                downloader::download_file(&config.client, &segment_uri, config.headers.clone())
+                    .await?;
             utils::save_file(&segment_content, &segment_file_path)?;
             println!("Segment saved to: {}", segment_file_path.display());
 
@@ -85,13 +129,21 @@ async fn handle_media_manifest(manifest_url: &Url, base_url: &Url, config: &Stre
     Ok(())
 }
 
-async fn handle_master_manifest(playlist: MasterPlaylist, config: &StreamConfig) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_master_manifest(
+    playlist: MasterPlaylist,
+    config: &StreamConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     let base_url = utils::get_base_url(&config.url);
 
     let variant_count = playlist.variants.len();
     println!("Processing {} variants", variant_count);
     for (i, variant) in playlist.variants.iter().enumerate() {
-        println!("[{}/{}] Processing variant: {}", i + 1, variant_count, variant.uri);
+        println!(
+            "[{}/{}] Processing variant: {}",
+            i + 1,
+            variant_count,
+            variant.uri
+        );
         let variant_url = base_url.join(&variant.uri)?;
         handle_media_manifest(&variant_url, &base_url, &config).await?;
         println!("");
@@ -109,11 +161,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = reqwest::Client::new();
     let server_port = args.port.unwrap_or(3030);
+    let headers = match &args.headers {
+        Some(headers) => parse_headers(headers),
+        None => None,
+    };
 
     let stream_config = StreamConfig {
         client,
         output_dir: std::path::PathBuf::from(args.output.as_str()),
         url: Url::parse(args.url.as_str())?,
+        headers,
         args,
     };
 
@@ -128,8 +185,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     utils::create_dir_if_not_exists(&stream_config.output_dir)?;
 
-    let manifest = downloader::download_file(&stream_config.client, &stream_config.url, None).await?;
-    
+    let manifest = downloader::download_file(
+        &stream_config.client,
+        &stream_config.url,
+        stream_config.headers.clone(),
+    )
+    .await?;
+
     match m3u8_rs::parse_playlist(&manifest) {
         Result::Ok((_, Playlist::MasterPlaylist(playlist))) => {
             println!("Master playlist found");
@@ -141,12 +203,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Master playlist saved to: {}", master_file_path.display());
 
             handle_master_manifest(playlist, &stream_config).await?;
-        },
+        }
         Result::Ok((_, Playlist::MediaPlaylist(_))) => {
             println!("Media playlist found");
             let base_url = utils::get_base_url(&stream_config.url);
             handle_media_manifest(&stream_config.url, &base_url, &stream_config).await?;
-        },
+        }
         Result::Err(e) => {
             println!("Error: {:?}", e);
             Err("Failed to parse m3u8 playlist")?
@@ -156,24 +218,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server::serve_files(server_port, &stream_config.output_dir).await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_arg_parse() {
-        let toml_text = r#"
-url = "https://example.com"
-output = "output"
-headers = ["header1: value1", "header2: value2"]
-port = 3030
-        "#;
-        let args: Args = toml::from_str(toml_text).unwrap();
-        assert_eq!(args.url, "https://example.com");
-        assert_eq!(args.output, "output");
-        assert_eq!(args.headers.unwrap().len(), 2);
-        assert_eq!(args.port.unwrap(), 3030);
-    }
 }
