@@ -19,21 +19,29 @@ use url::Url;
 struct Args {
     /// The URL of the m3u8 playlist
     url: String,
-
     /// The output directory
     output: String,
-
     /// Additional headers to send with the request
     headers: Option<HashMap<String, HeadersValue>>,
-
+    /// The number of segments to fetch
+    duration: Option<f32>,
+    /// The number of segments to fetch
+    count: Option<usize>,
     /// Server port to use
     port: Option<u16>,
 }
 
 #[derive(Deserialize, Debug)]
+#[serde(untagged)]
 enum HeadersValue {
     Single(String),
     Multiple(Vec<String>),
+}
+
+#[derive(Deserialize, Debug)]
+enum FetchLength {
+    Duration(f32),
+    Count(usize),
 }
 
 struct StreamConfig {
@@ -41,6 +49,7 @@ struct StreamConfig {
     url: Url,
     headers: Option<HeaderMap>,
     output_dir: std::path::PathBuf,
+    length: FetchLength,
     args: Args,
 }
 
@@ -95,12 +104,31 @@ async fn handle_media_manifest(
     if path.pop() {
         output_dir = output_dir.join(&path);
     }
-    let segment_count = manifest.segments.len();
+    let mut segment_count = manifest.segments.len();
+    match config.length {
+        FetchLength::Duration(duration) => {
+            let mut dur_sum = 0.0;
+            for (i, segment) in manifest.segments.iter().enumerate() {
+                dur_sum += segment.duration;
+                if dur_sum >= duration {
+                    segment_count = i;
+                    println!("Duration limit reached at segment: {}", i);
+                    break;
+                }
+            }
+        },
+        FetchLength::Count(count) => {
+            segment_count = std::cmp::min(segment_count, count);
+        }
+    }
 
     let mut segment_tasks = FuturesOrdered::new();
     let base_url = utils::get_base_url(&manifest_url);
 
     for (i, segment) in manifest.segments.iter().enumerate() {
+        if i >= segment_count {
+            break;
+        }
         let segment_uri = base_url.join(&segment.uri)?;
         let segment_file_path = output_dir.join(&segment.uri);
         let short_uri = segment.uri.clone();
@@ -165,12 +193,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(headers) => parse_headers(headers),
         None => None,
     };
+    let length = if let Some(duration) = args.duration {
+        FetchLength::Duration(duration)
+    } else if let Some(count) = args.count {
+        FetchLength::Count(count)
+    } else {
+        FetchLength::Count(usize::MAX)
+    };
 
     let stream_config = StreamConfig {
         client,
         output_dir: std::path::PathBuf::from(args.output.as_str()),
         url: Url::parse(args.url.as_str())?,
         headers,
+        length,
         args,
     };
 
@@ -193,7 +229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     match m3u8_rs::parse_playlist(&manifest) {
-        Result::Ok((_, Playlist::MasterPlaylist(playlist))) => {
+        Ok((_, Playlist::MasterPlaylist(playlist))) => {
             println!("Master playlist found");
             let master_file_name = utils::get_filename_from_url(&stream_config.url)
                 .ok_or("Failed to get filename from URL")?;
@@ -204,12 +240,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             handle_master_manifest(playlist, &stream_config).await?;
         }
-        Result::Ok((_, Playlist::MediaPlaylist(_))) => {
+        Ok((_, Playlist::MediaPlaylist(_))) => {
             println!("Media playlist found");
             let base_url = utils::get_base_url(&stream_config.url);
             handle_media_manifest(&stream_config.url, &base_url, &stream_config).await?;
         }
-        Result::Err(e) => {
+        Err(e) => {
             println!("Error: {:?}", e);
             Err("Failed to parse m3u8 playlist")?
         }
