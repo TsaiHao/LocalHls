@@ -50,7 +50,7 @@ struct StreamConfig {
     headers: Option<HeaderMap>,
     output_dir: std::path::PathBuf,
     length: FetchLength,
-    args: Args,
+    port: u16,
 }
 
 fn parse_headers(headers: &HashMap<String, HeadersValue>) -> Option<HeaderMap> {
@@ -188,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Args = toml::from_str(&config_text)?;
 
     let client = reqwest::Client::new();
-    let server_port = args.port.unwrap_or(3030);
+    let port = args.port.unwrap_or(3030);
     let headers = match &args.headers {
         Some(headers) => parse_headers(headers),
         None => None,
@@ -207,14 +207,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         url: Url::parse(args.url.as_str())?,
         headers,
         length,
-        args,
+        port,
     };
 
     println!("-------------------------");
     println!("Received Parameters:");
     println!("URL: {}", stream_config.url);
     println!("Output Directory: {}", stream_config.output_dir.display());
-    if let Some(headers) = &stream_config.args.headers {
+    if let Some(headers) = &args.headers {
         println!("Headers: {:?}", headers);
     }
     println!("-------------------------");
@@ -251,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    server::serve_files(server_port, &stream_config.output_dir).await?;
+    server::serve_files(&stream_config).await?;
 
     Ok(())
 }
