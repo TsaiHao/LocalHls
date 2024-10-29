@@ -16,9 +16,14 @@ pub async fn download_file(client: &reqwest::Client, url: &Url, headers: Option<
     let response = request.send().await?;
 
     if response.status().is_success() {
+        let response_headers = response.headers();
+        for (name, value) in response_headers {
+            println!("[debug] Header: {:?} = {:?}", name, value);
+        }
         let content = response.bytes().await?.to_vec();
         Ok(content)
     } else {
+        println!("Failed to download file: {}", response.status());
         Err(format!("Failed to download file: {}", response.status()).into())
     }
 }

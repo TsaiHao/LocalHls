@@ -131,6 +131,15 @@ async fn handle_media_manifest(
         }
         let segment_uri = base_url.join(&segment.uri)?;
         let segment_file_path = output_dir.join(&segment.uri);
+        if segment_file_path.exists() {
+            println!(
+                "[{}/{}]Segment already exists: {}",
+                i + 1,
+                segment_count,
+                segment_file_path.display()
+            );
+            continue;
+        }
         let short_uri = segment.uri.clone();
 
         segment_tasks.push_back(async move {
@@ -187,6 +196,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_text = std::fs::read_to_string(config_file)?;
     let args: Args = toml::from_str(&config_text)?;
 
+    let output_dir = std::path::absolute(&args.output)?;
+
     let client = reqwest::Client::new();
     let port = args.port.unwrap_or(3030);
     let headers = match &args.headers {
@@ -203,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stream_config = StreamConfig {
         client,
-        output_dir: std::path::PathBuf::from(args.output.as_str()),
+        output_dir,
         url: Url::parse(args.url.as_str())?,
         headers,
         length,

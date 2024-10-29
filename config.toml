@@ -6,8 +6,8 @@ duration = 100
 
 # segment = 5
 
+port = 8999
+
 [headers]
 User-Agent = "LocalHls"
 Custom-Headers = ["Value1", "Value2"]
-
-port = 8999
