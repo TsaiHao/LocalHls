@@ -9,5 +9,5 @@ duration = 100
 port = 8999
 
 [headers]
-User-Agent = "LocalHls"
+User-Agent = "Mozilla/5.0"
 Custom-Headers = ["Value1", "Value2"]
