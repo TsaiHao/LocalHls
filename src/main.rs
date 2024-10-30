@@ -3,9 +3,7 @@ mod server;
 mod utils;
 
 use futures::stream::{FuturesOrdered, StreamExt};
-use m3u8_rs;
-use m3u8_rs::MasterPlaylist;
-use m3u8_rs::Playlist;
+use m3u8_rs::{self, MasterPlaylist, Playlist};
 use reqwest;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;

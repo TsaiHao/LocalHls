@@ -2,6 +2,8 @@ url = "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/b
 
 output = "output"
 
+start = 20
+
 duration = 100
 
 # segment = 5

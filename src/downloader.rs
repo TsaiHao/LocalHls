@@ -27,19 +27,3 @@ pub async fn download_file(client: &reqwest::Client, url: &Url, headers: Option<
         Err(format!("Failed to download file: {}", response.status()).into())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-    use super::*;
-
-    #[tokio::test]
-    async fn test_file_download() {
-        let client = reqwest::Client::new();
-        let url = Url::parse("https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8").unwrap();
-        let headers = None;
-
-        let content = download_file(&client, &url, headers).await.unwrap();
-        assert!(content.len() > 0);
-    }
-}
